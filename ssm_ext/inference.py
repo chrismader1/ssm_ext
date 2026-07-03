@@ -1040,11 +1040,11 @@ def fit_null_transitions(mdl_r, y_tr, zhat_tr=None, n_grid=9, gss_iter=0):
     return log_Ps, log_pi0
 
 
-def t3_pair_scores(mdl_r, y_tr, y_joint, T_split, h_grid=(1, 4), zhat_tr=None):
+def t3_pair_scores(mdl_r, y_tr, y_joint, T_split, t3_h, zhat_tr=None):
     """
     T3 scoring for one (security, batch): fit the matched null on the
     training window, then score candidate and null on the joint [train, test]
-    series at each horizon in h_grid. Returns a flat dict of per-batch
+    series at each horizon in t3_h. Returns a flat dict of per-batch
     columns:
         cpll{h}_oos        — rSLDS h-step OOS CPLL
         cpll{h}_null_oos   — matched-null h-step OOS CPLL
@@ -1064,7 +1064,7 @@ def t3_pair_scores(mdl_r, y_tr, y_joint, T_split, h_grid=(1, 4), zhat_tr=None):
         raise ValueError("t3_pair_scores: candidate must be an rSLDS "
                          f"(recurrent transitions), got {type(tr).__name__}")
     out = {}
-    for h in h_grid:
+    for h in t3_h:
         _, oos_r = causal_cpll_h(mdl_r, y_joint, T_split, h=h,
                                  transition_kind=cand_kind)
         _, oos_0 = causal_cpll_h(mdl_r, y_joint, T_split, h=h,

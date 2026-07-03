@@ -12,7 +12,8 @@ import autograd.numpy as _anp
 from autograd.scipy.special import logsumexp as _ag_logsumexp
 from ssm.transitions import (RecurrentOnlyTransitions as _RecOnly,
                              StationaryTransitions as _Stationary,
-                             RecurrentTransitions as _Recurrent)
+                             RecurrentTransitions as _Recurrent,
+                             StickyTransitions as _StickyStd)
 
 
 # ---------------------------------------------------------------
@@ -28,81 +29,55 @@ from ssm.transitions import (RecurrentOnlyTransitions as _RecOnly,
 
 
 class StickyRecurrentOnly(_RecOnly):
-    """Recurrent-only rSLDS transitions with fixed self-transition stickiness.
+    """NATIVE recurrent-only gate -- NOT AVAILABLE.
 
-    Linderman et al. ("Bayesian Learning and Inference in Recurrent Switching
-    Linear Dynamical Systems", AISTATS 2017) define `recurrent_only`:
-    log p(z_t=j | x) = R_j.x + r_j, with NO dependence on z_{t-1}, so the
-    discrete state carries no temporal persistence of its own. This subclass
-    adds Fox-style self-transition stickiness ("A sticky HDP-HMM with
-    application to speaker diarization", Ann. Appl. Stat. 2011): a fixed
-    scalar kappa added to the diagonal of the per-step log transition
-    matrix before normalisation,
-
-        log p(z_t=j | z_{t-1}=i, x) = R_j.x + r_j + kappa * 1[i==j]
-
-    so regime persistence lives in the DISCRETE transitions and the
-    continuous AR coefficient A can stay bounded (stationary). kappa is a
-    constant; not added to params, not optimised in the M-step.
+    ssm's RecurrentOnlyTransitions subclasses Transitions directly
+    (log p(z_t=j | x) = R_j.x + r_j, no stationary log_Ps) and carries NO
+    Dirichlet (alpha, kappa) sticky prior, so native stickiness cannot ride in a
+    prior here. The validated run uses transition_kind='recurrent' throughout, so
+    this path is never taken; it raises rather than silently reverting to the
+    bolt-on logit mechanism.
     """
 
     def __init__(self, K, D, M, kappa):
-        super(StickyRecurrentOnly, self).__init__(K, D, M=M)
-        self.kappa = float(kappa)
-
-    def log_transition_matrices(self, data, input, mask, tag):
-        lp = super(StickyRecurrentOnly, self).log_transition_matrices(
-            data, input, mask, tag)
-        lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
-        return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
+        raise NotImplementedError(
+            "Native Dirichlet stickiness is unavailable for the recurrent_only "
+            "gate (ssm's RecurrentOnlyTransitions has no alpha/kappa prior). Use "
+            "transition_kind='recurrent' (StickyRecurrent) for native kappa.")
 
 
 class StickyRecurrent(_Recurrent):
-    """Full rSLDS(s) transitions (Linderman 2017 Eq. 4, shared-weights variant)
-    with the SAME Fox-2011 self-transition stickiness as the other two sticky
-    classes. Combines a per-state Markov matrix with a shared recurrence term:
+    """NATIVE full rSLDS(s) transitions (Linderman 2017 Eq. 4, shared variant)
+    with Fox-2011 stickiness carried by ssm's OWN Dirichlet self-transition prior
+    rather than a bolt-on logit bump.
 
-        log p(z_t=j | z_{t-1}=i, x) = log_Ps[i,j] + R_j.x + kappa * 1[i==j]
-
-    (then renormalised). Setting R=0 recovers exactly StickyStandard, so a
-    fixed-matrix null is NESTED in this candidate -- the property the
-    state-dependence test (T3) relies on. kappa is a constant; not added to
-    params, not optimised in the M-step.
+    ssm's RecurrentTransitions (InputDrivenTransitions <- StickyTransitions) is
+    natively sticky: the row-wise prior pi_k ~ Dir(alpha + kappa * e_k) enters
+    log_prior() -> the gradient M-step, while the recurrent term R.x stays in
+    log_transition_matrices. kappa is a FIXED hyperparameter (not a fitted param).
+    alpha is FIXED to 1, so at K=2 the prior-mean self-transition gives
+    E[dwell] = kappa + 2 (the native map). Setting Rs=0 recovers the stationary
+    Dirichlet transitions (StickyStandard), so the fixed-matrix null is NESTED --
+    the property the state-dependence test (T3) relies on.
     """
 
     def __init__(self, K, D, M, kappa):
-        super(StickyRecurrent, self).__init__(K, D, M=M)
-        self.kappa = float(kappa)
-
-    def log_transition_matrices(self, data, input, mask, tag):
-        lp = super(StickyRecurrent, self).log_transition_matrices(
-            data, input, mask, tag)
-        lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
-        return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
+        super(StickyRecurrent, self).__init__(K, D, M=M, alpha=1, kappa=float(kappa))
 
 
-class StickyStandard(_Stationary):
-    """Standard (time-homogeneous) transitions carrying the SAME Fox-2011 self-
-    transition stickiness as StickyRecurrentOnly. A fixed scalar kappa is added to
-    the diagonal of the per-step log transition matrix and then renormalised -- the
-    IDENTICAL treatment applied to the recurrent sticky gate -- so an rSLDS-vs-SLDS
-    comparison differs ONLY in the transition functional form (recurrent R.x vs a
-    fixed K x K matrix), not in the stickiness regularisation:
-
-        log p(z_t=j | z_{t-1}=i) = log_Ps[i,j] + kappa * 1[i==j]   (then renormalised)
-
-    kappa is a constant; not added to params, not optimised in the M-step.
+class StickyStandard(_StickyStd):
+    """NATIVE time-homogeneous transitions carrying Fox-2011 stickiness via ssm's
+    Dirichlet self-transition prior (StickyTransitions) -- the matched
+    fixed-matrix comparator for T3. The transition matrix is a fixed K x K log_Ps
+    (time-homogeneous); kappa upweights the diagonal of the prior
+    pi_k ~ Dir(alpha + kappa * e_k), which enters the closed-form MAP M-step.
+    alpha is FIXED to 1 (E[dwell] = kappa + 2 at K=2). Differs from StickyRecurrent
+    ONLY in the transition functional form (fixed matrix vs recurrent R.x), with
+    the SAME native stickiness prior -- so rSLDS - SLDS isolates exactly R.x.
     """
 
     def __init__(self, K, D, M, kappa):
-        super(StickyStandard, self).__init__(K, D, M=M)
-        self.kappa = float(kappa)
-
-    def log_transition_matrices(self, data, input, mask, tag):
-        lp = super(StickyStandard, self).log_transition_matrices(
-            data, input, mask, tag)
-        lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
-        return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
+        super(StickyStandard, self).__init__(K, D, M=M, alpha=1, kappa=float(kappa))
 
 
 # ---------------------------------------------------------------
