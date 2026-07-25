@@ -375,7 +375,7 @@ def extract_params_records(model, model_type, K, D, N, batch_id):
 
     Returns: list of K dicts, each with keys
         regime, model_type,
-        rho, b, mu, sigmasq, Rs, r, Cs, ds,    (rSLDS-applicable; HMM/AR-HMM -> NaN)
+        rho, A_full, b, mu, sigmasq, Rs, r, Cs, ds,  (rSLDS-applicable; HMM/AR-HMM -> NaN)
         A_obs, b_obs,                          (AR-HMM-applicable; rSLDS/HMM -> NaN)
         transition_self, log_pi0
     Variable-length values are JSON-encoded strings.
@@ -418,6 +418,14 @@ def extract_params_records(model, model_type, K, D, N, batch_id):
                 "regime":          int(k),
                 "model_type":      model_type,
                 "rho":             json.dumps(rho_k.tolist()),
+                # Full transition matrix. `rho` is only the diagonal, which is
+                # lossless ONLY for fits that enforce diagonal dynamics (the
+                # *_restricted paths). Unrestricted fit_rSLDS / fit_SLDS pass
+                # dynamics="diagonal_gaussian", which constrains the process
+                # NOISE, not A, so off-diagonals appear after the first M-step
+                # and were previously discarded -- making those fits
+                # unreconstructable from this file. D <= 4, so this is cheap.
+                "A_full":          json.dumps(As[k].tolist()),
                 "b":               json.dumps(b_k.tolist()),
                 "mu":              json.dumps(mu_k.tolist()),
                 "sigmasq":         json.dumps(sig_k.tolist()),
@@ -460,6 +468,14 @@ def extract_params_records(model, model_type, K, D, N, batch_id):
                 "regime":          int(k),
                 "model_type":      model_type,
                 "rho":             json.dumps(rho_k.tolist()),
+                # Full transition matrix. `rho` is only the diagonal, which is
+                # lossless ONLY for fits that enforce diagonal dynamics (the
+                # *_restricted paths). Unrestricted fit_rSLDS / fit_SLDS pass
+                # dynamics="diagonal_gaussian", which constrains the process
+                # NOISE, not A, so off-diagonals appear after the first M-step
+                # and were previously discarded -- making those fits
+                # unreconstructable from this file. D <= 4, so this is cheap.
+                "A_full":          json.dumps(As[k].tolist()),
                 "b":               json.dumps(b_k.tolist()),
                 "mu":              json.dumps(mu_k.tolist()),
                 "sigmasq":         json.dumps(sig_k.tolist()),
@@ -485,6 +501,7 @@ def extract_params_records(model, model_type, K, D, N, batch_id):
                 "regime":          int(k),
                 "model_type":      model_type,
                 "rho":             None,
+                "A_full":          None,
                 "b":               None,
                 "mu":              json.dumps(mus[k].tolist()),
                 "sigmasq":         json.dumps(sigmasq[k].tolist()),
@@ -511,6 +528,7 @@ def extract_params_records(model, model_type, K, D, N, batch_id):
                 "regime":          int(k),
                 "model_type":      model_type,
                 "rho":             None,
+                "A_full":          None,
                 "b":               None,
                 "mu":              None,
                 "sigmasq":         json.dumps(sigmasq[k].tolist()),
