@@ -2,7 +2,7 @@
 
 import numpy as np
 from scipy.special import logsumexp
-from ._utils import _lse, _mvn_logpdf
+from ._utils import _lse, _mvn_logpdf, effective_log_Ps
 from .bounds import max_cpll_causal_bound
 
 
@@ -817,9 +817,10 @@ def causal_cpll_h(mdl, y, T_split, h=4, transition_kind="recurrent",
     elif rec_full:
         # full rSLDS(s): log p(z'=j | z=i, x) prop log_Ps[i,j] + Rs[j].x + kappa*1[i==j]
         Rs = np.asarray(mdl.transitions.Rs, dtype=float)            # (K, D)
-        log_Ps = np.asarray(mdl.transitions.log_Ps, dtype=float)    # (K, K)
-        kappa = float(getattr(mdl.transitions, "kappa", 0.0))
-        log_Ps_eff = log_Ps + kappa * np.eye(K)
+        # EFFECTIVE matrix from the class, not rebuilt from .kappa here: the
+        # class owns where kappa sits. Row-normalising now is harmless -- the
+        # per-row constant cancels in the final normalisation below.
+        log_Ps_eff = effective_log_Ps(mdl.transitions, K)            # (K, K)
         if log_pi0 is None:
             log_pi0 = np.asarray(mdl.init_state_distn.log_pi0, dtype=float)
         log_pi0 = log_pi0 - logsumexp(log_pi0)

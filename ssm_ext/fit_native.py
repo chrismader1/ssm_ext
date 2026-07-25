@@ -1,5 +1,6 @@
 # fit.py
 
+import hashlib
 import numpy as np
 import numpy.random as npr
 import ssm
@@ -14,6 +15,29 @@ from ssm.transitions import (RecurrentOnlyTransitions as _RecOnly,
                              StationaryTransitions as _Stationary,
                              RecurrentTransitions as _Recurrent,
                              StickyTransitions as _StickyStd)
+
+
+# ---------------------------------------------------------------
+# Deterministic seed derivation
+# ---------------------------------------------------------------
+
+def _stable_seed(*parts):
+    """A reproducible uint32 seed from any identifying parts.
+
+    Use this instead of the builtin `hash()` for anything that feeds an RNG.
+    Python salts the hash of str and bytes per process (PYTHONHASHSEED, random
+    by default), so `hash(("EM", 3, 1))` returns a different value in every
+    interpreter — and therefore in every joblib/loky worker. Anything seeded
+    from it is unreproducible across runs even when the caller passed a seed.
+
+    blake2b is unsalted, so the value is stable across processes, machines and
+    Python versions. Byte-for-byte identical to
+    ssm_experiments.reproducibility.derive_seed and to fit._stable_seed — all
+    three can be cross-checked.
+    """
+    payload = "\x1f".join("" if p is None else str(p) for p in parts)
+    digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % (2 ** 32)
 
 
 # ---------------------------------------------------------------
@@ -33,10 +57,10 @@ class StickyRecurrentOnly(_RecOnly):
 
     ssm's RecurrentOnlyTransitions subclasses Transitions directly
     (log p(z_t=j | x) = R_j.x + r_j, no stationary log_Ps) and carries NO
-    Dirichlet (alpha, kappa) sticky prior, so native stickiness cannot ride in a
-    prior here. The validated run uses transition_kind='recurrent' throughout, so
-    this path is never taken; it raises rather than silently reverting to the
-    bolt-on logit mechanism.
+    Dirichlet (alpha, kappa) sticky prior, so stickiness cannot ride in a prior
+    here. The validated run uses transition_kind='recurrent' throughout, so this
+    path is never taken; it raises rather than silently substituting a different
+    stickiness mechanism.
     """
 
     def __init__(self, K, D, M, kappa):
@@ -45,11 +69,15 @@ class StickyRecurrentOnly(_RecOnly):
             "gate (ssm's RecurrentOnlyTransitions has no alpha/kappa prior). Use "
             "transition_kind='recurrent' (StickyRecurrent) for native kappa.")
 
+    def effective_log_Ps(self):
+        """None: this gate carries no stationary (K, K) matrix. Unreachable --
+        __init__ raises -- but present so both fitters expose one class API."""
+        return None
+
 
 class StickyRecurrent(_Recurrent):
-    """NATIVE full rSLDS(s) transitions (Linderman 2017 Eq. 4, shared variant)
-    with Fox-2011 stickiness carried by ssm's OWN Dirichlet self-transition prior
-    rather than a bolt-on logit bump.
+    """Full rSLDS(s) transitions (Linderman 2017 Eq. 4, shared variant) with
+    Fox-2011 stickiness carried by ssm's own Dirichlet self-transition prior.
 
     ssm's RecurrentTransitions (InputDrivenTransitions <- StickyTransitions) is
     natively sticky: the row-wise prior pi_k ~ Dir(alpha + kappa * e_k) enters
@@ -63,6 +91,14 @@ class StickyRecurrent(_Recurrent):
 
     def __init__(self, K, D, M, kappa):
         super(StickyRecurrent, self).__init__(K, D, M=M, alpha=1, kappa=float(kappa))
+
+    def effective_log_Ps(self):
+        """log_Ps unchanged. kappa entered through the Dirichlet prior in
+        log_prior() and shaped the M-step, so it is ALREADY inside the fitted
+        log_Ps; log_transition_matrices adds no kappa term. Folding kappa*I in
+        again here would double-count it."""
+        lp = np.asarray(self.log_Ps, dtype=float)
+        return lp - logsumexp(lp, axis=1, keepdims=True)
 
 
 class StickyStandard(_StickyStd):
@@ -78,6 +114,14 @@ class StickyStandard(_StickyStd):
 
     def __init__(self, K, D, M, kappa):
         super(StickyStandard, self).__init__(K, D, M=M, alpha=1, kappa=float(kappa))
+
+    def effective_log_Ps(self):
+        """log_Ps unchanged. kappa entered through the Dirichlet prior in
+        log_prior() and shaped the M-step, so it is ALREADY inside the fitted
+        log_Ps; log_transition_matrices adds no kappa term. Folding kappa*I in
+        again here would double-count it."""
+        lp = np.asarray(self.log_Ps, dtype=float)
+        return lp - logsumexp(lp, axis=1, keepdims=True)
 
 
 # ---------------------------------------------------------------
@@ -1165,7 +1209,8 @@ def fit_rSLDS_restricted_em(y, params, C=None, d=None, n_iter_em=10, seed=None,
             except AssertionError:
                 if attempt == max_attempts - 1:
                     break
-                rng = np.random.RandomState(seed=hash(("EM", iters_done, attempt)) % (2**31 - 1))
+                rng = np.random.RandomState(
+                    seed=_stable_seed(seed, "EM", iters_done, attempt))
                 mdl.dynamics.bs = mdl.dynamics.bs + 1e-3 * rng.randn(*mdl.dynamics.bs.shape)
         if not fit_ok:
             break

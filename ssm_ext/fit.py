@@ -1,5 +1,6 @@
 # fit.py
 
+import hashlib
 import numpy as np
 import numpy.random as npr
 import ssm
@@ -13,6 +14,28 @@ from autograd.scipy.special import logsumexp as _ag_logsumexp
 from ssm.transitions import (RecurrentOnlyTransitions as _RecOnly,
                              StationaryTransitions as _Stationary,
                              RecurrentTransitions as _Recurrent)
+
+
+# ---------------------------------------------------------------
+# Deterministic seed derivation
+# ---------------------------------------------------------------
+
+def _stable_seed(*parts):
+    """A reproducible uint32 seed from any identifying parts.
+
+    Use this instead of the builtin `hash()` for anything that feeds an RNG.
+    Python salts the hash of str and bytes per process (PYTHONHASHSEED, random
+    by default), so `hash(("EM", 3, 1))` returns a different value in every
+    interpreter — and therefore in every joblib/loky worker. Anything seeded
+    from it is unreproducible across runs even when the caller passed a seed.
+
+    blake2b is unsalted, so the value is stable across processes, machines and
+    Python versions. Byte-for-byte identical to
+    ssm_experiments.reproducibility.derive_seed — the two can be cross-checked.
+    """
+    payload = "\x1f".join("" if p is None else str(p) for p in parts)
+    digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % (2 ** 32)
 
 
 # ---------------------------------------------------------------
@@ -56,6 +79,11 @@ class StickyRecurrentOnly(_RecOnly):
         lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
         return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
 
+    def effective_log_Ps(self):
+        """None: this gate carries no stationary (K, K) matrix -- the whole
+        transition is R.x + r + kappa*I, formed per step."""
+        return None
+
 
 class StickyRecurrent(_Recurrent):
     """Full rSLDS(s) transitions (Linderman 2017 Eq. 4, shared-weights variant)
@@ -80,6 +108,13 @@ class StickyRecurrent(_Recurrent):
         lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
         return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
 
+    def effective_log_Ps(self):
+        """kappa is applied on top of log_Ps at every step, so the matrix the
+        model actually uses is normalise(log_Ps + kappa*I). Persistence and
+        scoring must fold it in; log_Ps alone understates the stickiness."""
+        lp = np.asarray(self.log_Ps, dtype=float) + self.kappa * np.eye(self.K)
+        return lp - logsumexp(lp, axis=1, keepdims=True)
+
 
 class StickyStandard(_Stationary):
     """Standard (time-homogeneous) transitions carrying the SAME Fox-2011 self-
@@ -103,6 +138,13 @@ class StickyStandard(_Stationary):
             data, input, mask, tag)
         lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
         return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
+
+    def effective_log_Ps(self):
+        """kappa is applied on top of log_Ps at every step, so the matrix the
+        model actually uses is normalise(log_Ps + kappa*I). Persistence and
+        scoring must fold it in; log_Ps alone understates the stickiness."""
+        lp = np.asarray(self.log_Ps, dtype=float) + self.kappa * np.eye(self.K)
+        return lp - logsumexp(lp, axis=1, keepdims=True)
 
 
 # ---------------------------------------------------------------
@@ -1190,7 +1232,8 @@ def fit_rSLDS_restricted_em(y, params, C=None, d=None, n_iter_em=10, seed=None,
             except AssertionError:
                 if attempt == max_attempts - 1:
                     break
-                rng = np.random.RandomState(seed=hash(("EM", iters_done, attempt)) % (2**31 - 1))
+                rng = np.random.RandomState(
+                    seed=_stable_seed(seed, "EM", iters_done, attempt))
                 mdl.dynamics.bs = mdl.dynamics.bs + 1e-3 * rng.randn(*mdl.dynamics.bs.shape)
         if not fit_ok:
             break

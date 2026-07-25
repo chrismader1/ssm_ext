@@ -8,6 +8,8 @@ from scipy.optimize import minimize
 import json
 from scipy.special import logsumexp
 
+from ._utils import effective_log_Ps
+
 
 def print_rSLDS_matrices(model, restricted=False, dt=None, latent_names=None):
 
@@ -392,13 +394,11 @@ def extract_params_records(model, model_type, K, D, N, batch_id):
         _r_attr  = getattr(model.transitions, "r", None)
         r_vec    = (np.asarray(_r_attr, dtype=float) if _r_attr is not None
                     else np.full(K, np.nan))
-        _lp_attr = getattr(model.transitions, "log_Ps", None)
-        if _lp_attr is not None:
-            _kap   = float(getattr(model.transitions, "kappa", 0.0))
-            lp_eff = np.asarray(_lp_attr, dtype=float) + _kap * np.eye(K)
-            lp_eff = lp_eff - logsumexp(lp_eff, axis=1, keepdims=True)
-        else:
-            lp_eff = None
+        # The EFFECTIVE matrix, asked of the transition class rather than
+        # reconstructed from .kappa here. Where kappa sits differs by class --
+        # applied on top of log_Ps every step, or already folded into log_Ps by
+        # a prior during fitting -- and only the class knows which.
+        lp_eff = effective_log_Ps(model.transitions, K)
         Cs       = np.asarray(model.emissions.Cs,     dtype=float)   # (1,N,D) or (K,N,D)
         ds       = np.asarray(model.emissions.ds,     dtype=float)   # (1,N) or (K,N)
         invE     = np.asarray(model.emissions.inv_etas, dtype=float) # (1,N) or (K,N)
