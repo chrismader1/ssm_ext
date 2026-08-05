@@ -63,7 +63,7 @@ class StickyRecurrentOnly(_RecOnly):
     stickiness mechanism.
     """
 
-    def __init__(self, K, D, M, kappa):
+    def __init__(self, K, D, M, kappa, alpha=1.0):
         raise NotImplementedError(
             "Native Dirichlet stickiness is unavailable for the recurrent_only "
             "gate (ssm's RecurrentOnlyTransitions has no alpha/kappa prior). Use "
@@ -89,8 +89,14 @@ class StickyRecurrent(_Recurrent):
     the property the state-dependence test (T3) relies on.
     """
 
-    def __init__(self, K, D, M, kappa):
-        super(StickyRecurrent, self).__init__(K, D, M=M, alpha=1, kappa=float(kappa))
+    def __init__(self, K, D, M, kappa, alpha=1.0):
+        # alpha scales the WHOLE Dirichlet row: pi_k ~ Dir(alpha*1 + kappa*e_k).
+        # Prior-mean self-transition = (alpha+kappa)/(K*alpha+kappa), so with
+        # kappa = alpha*(D-2) (K=2) the prior MEAN dwell is D regardless of
+        # alpha, while the prior MASS (its weight against the likelihood's
+        # transition counts) is alpha*D. alpha=1 reproduces the historic
+        # weakly-informative prior.
+        super(StickyRecurrent, self).__init__(K, D, M=M, alpha=float(alpha), kappa=float(kappa))
 
     def effective_log_Ps(self):
         """log_Ps unchanged. kappa entered through the Dirichlet prior in
@@ -112,8 +118,9 @@ class StickyStandard(_StickyStd):
     the SAME native stickiness prior -- so rSLDS - SLDS isolates exactly R.x.
     """
 
-    def __init__(self, K, D, M, kappa):
-        super(StickyStandard, self).__init__(K, D, M=M, alpha=1, kappa=float(kappa))
+    def __init__(self, K, D, M, kappa, alpha=1.0):
+        # Same alpha-scaled Dirichlet row as StickyRecurrent (see there).
+        super(StickyStandard, self).__init__(K, D, M=M, alpha=float(alpha), kappa=float(kappa))
 
     def effective_log_Ps(self):
         """log_Ps unchanged. kappa entered through the Dirichlet prior in
@@ -672,9 +679,10 @@ def fit_rSLDS_restricted_em(y, params, C=None, d=None, n_iter_em=10, seed=None,
     min_occupancy=0.05,      # per-regime usage floor; an EM run that drops the occupied-regime
                              # count below the closed-form's is rejected in favour of that fit
     transition_kind="recurrent",   # default: full recurrent gate (Eq.4), nests sticky SLDS at R=0;
-    sticky_kappa=None):   # Fox sticky self-transition weight; None => no stickiness
                              # "standard" -> SLDS (StickyStandard fixed matrix). Same kappa, same
                              # warm-up / EM / occupancy-revert: the ONLY difference is the gate form.
+    sticky_kappa=None,    # Fox sticky self-transition weight; None => no stickiness
+    sticky_alpha=None):   # Dirichlet row strength; None => 1.0 (historic weakly-informative prior)
 
     """
     True rSLDS via ssm (Laplace EM + structured mean field):
@@ -791,14 +799,15 @@ def fit_rSLDS_restricted_em(y, params, C=None, d=None, n_iter_em=10, seed=None,
     #   recurrent_only -> StickyRecurrentOnly  (Linderman 2017 gate)
     #   recurrent      -> StickyRecurrent      (Eq.4 shared variant, nests standard)
     #   standard       -> StickyStandard       (fixed K x K matrix)
+    _alpha = 1.0 if sticky_alpha is None else float(sticky_alpha)
     if sticky_kappa is None:
         pass  # no stickiness: keep the plain _RecOnly/_Recurrent/_Stationary gate
     elif _rec_only:
-        mdl.transitions = StickyRecurrentOnly(K, D, M=0, kappa=sticky_kappa)
+        mdl.transitions = StickyRecurrentOnly(K, D, M=0, kappa=sticky_kappa, alpha=_alpha)
     elif _rec_full:
-        mdl.transitions = StickyRecurrent(K, D, M=0, kappa=sticky_kappa)
+        mdl.transitions = StickyRecurrent(K, D, M=0, kappa=sticky_kappa, alpha=_alpha)
     else:
-        mdl.transitions = StickyStandard(K, D, M=0, kappa=sticky_kappa)
+        mdl.transitions = StickyStandard(K, D, M=0, kappa=sticky_kappa, alpha=_alpha)
 
     # ----- emissions (fixed if C,d provided; else learned)
     fixed_emissions = (C is not None) and (d is not None)

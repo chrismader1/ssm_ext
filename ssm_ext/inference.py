@@ -937,7 +937,8 @@ def causal_cpll_h(mdl, y, T_split, h=4, transition_kind="recurrent",
     return float(cpll_h), float(cpll_h_oos)
 
 
-def fit_null_transitions(mdl_r, y_tr, zhat_tr=None, n_grid=9, gss_iter=0):
+def fit_null_transitions(mdl_r, y_tr, zhat_tr=None, n_grid=9, gss_iter=0,
+                         sticky_alpha=None, sticky_kappa=None):
     """
     Estimate the matched null's (log_Ps, log_pi0) on the training window with
     all regime-conditional parameters frozen at the fitted rSLDS values, by
@@ -957,6 +958,16 @@ def fit_null_transitions(mdl_r, y_tr, zhat_tr=None, n_grid=9, gss_iter=0):
 
     init_state distn is the Laplace-smoothed empirical regime frequency of the
     decoded training path (unchanged from before).
+
+    sticky_alpha / sticky_kappa: when BOTH are given, the row objective is the
+    causal filter likelihood PLUS the same sticky-Dirichlet log-prior the
+    candidate carries, pi_k ~ Dir(alpha*1 + kappa*e_k) -- the identical
+    functional form ssm's StickyTransitions.log_prior applies to the
+    candidate's baseline log_Ps during EM. Without this the null is fitted by
+    pure ML while the candidate is shrunk toward the measured dwell, and the
+    T3 gap conflates that shrinkage with the recurrent term R.x it is meant to
+    isolate. Either being None (map runs, which set no alpha) restores the
+    historic prior-free ML null exactly.
     """
     y_tr = np.asarray(y_tr, dtype=float)
     if y_tr.ndim == 1:
@@ -977,6 +988,19 @@ def fit_null_transitions(mdl_r, y_tr, zhat_tr=None, n_grid=9, gss_iter=0):
     log_pi0 = np.log(pi_cnt / pi_cnt.sum())
 
     EPS = 1e-4
+
+    # Sticky-Dirichlet concentration matrix A[k,j] = alpha + kappa*1[j==k].
+    # None unless BOTH hyperparameters are supplied -> prior-free ML null.
+    _A = None
+    if sticky_alpha is not None and sticky_kappa is not None:
+        _A = float(sticky_alpha) * np.ones((K, K)) + float(sticky_kappa) * np.eye(K)
+
+    def _log_prior(Pm):
+        if _A is None:
+            return 0.0
+        lp = np.log(np.clip(Pm, 1e-300, None))
+        lp = lp - logsumexp(lp, axis=1, keepdims=True)
+        return float(np.sum((_A - 1.0) * lp))
 
     # off-diagonal split proportions per row (from warm-start counts)
     off_share = np.zeros((K, K))
@@ -1001,7 +1025,7 @@ def fit_null_transitions(mdl_r, y_tr, zhat_tr=None, n_grid=9, gss_iter=0):
         c, _ = causal_cpll_h(mdl_r, y_tr, T_split=Tw, h=1,
                              transition_kind="standard",
                              log_Ps=log_Ps, log_pi0=log_pi0)
-        return -c
+        return -c - _log_prior(Pm)
 
     def _obj_row(k, p):
         trial = Pmat.copy()
@@ -1041,7 +1065,8 @@ def fit_null_transitions(mdl_r, y_tr, zhat_tr=None, n_grid=9, gss_iter=0):
     return log_Ps, log_pi0
 
 
-def t3_pair_scores(mdl_r, y_tr, y_joint, T_split, t3_h, zhat_tr=None):
+def t3_pair_scores(mdl_r, y_tr, y_joint, T_split, t3_h, zhat_tr=None,
+                   sticky_alpha=None, sticky_kappa=None):
     """
     T3 scoring for one (security, batch): fit the matched null on the
     training window, then score candidate and null on the joint [train, test]
@@ -1051,7 +1076,11 @@ def t3_pair_scores(mdl_r, y_tr, y_joint, T_split, t3_h, zhat_tr=None):
         cpll{h}_null_oos   — matched-null h-step OOS CPLL
         t3_gap_h{h}        — their difference (the T3 per-batch gap)
     """
-    log_Ps, log_pi0 = fit_null_transitions(mdl_r, y_tr, zhat_tr=zhat_tr)
+    # The null inherits the candidate's stickiness prior so the gap below
+    # isolates R.x and not the prior shrinkage. See fit_null_transitions.
+    log_Ps, log_pi0 = fit_null_transitions(mdl_r, y_tr, zhat_tr=zhat_tr,
+                                           sticky_alpha=sticky_alpha,
+                                           sticky_kappa=sticky_kappa)
     # auto-detect the candidate's transition kind from its parameters:
     # Rs + r -> recurrent_only (rSLDS(ro)); Rs + log_Ps -> recurrent (rSLDS(s))
     tr = mdl_r.transitions
