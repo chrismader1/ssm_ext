@@ -13,8 +13,7 @@ import autograd.numpy as _anp
 from autograd.scipy.special import logsumexp as _ag_logsumexp
 from ssm.transitions import (RecurrentOnlyTransitions as _RecOnly,
                              StationaryTransitions as _Stationary,
-                             RecurrentTransitions as _Recurrent,
-                             StickyTransitions as _StickyStd)
+                             RecurrentTransitions as _Recurrent)
 
 
 # ---------------------------------------------------------------
@@ -32,8 +31,7 @@ def _stable_seed(*parts):
 
     blake2b is unsalted, so the value is stable across processes, machines and
     Python versions. Byte-for-byte identical to
-    ssm_experiments.reproducibility.derive_seed and to fit._stable_seed — all
-    three can be cross-checked.
+    ssm_experiments.reproducibility.derive_seed — the two can be cross-checked.
     """
     payload = "\x1f".join("" if p is None else str(p) for p in parts)
     digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=8).digest()
@@ -53,81 +51,99 @@ def _stable_seed(*parts):
 
 
 class StickyRecurrentOnly(_RecOnly):
-    """NATIVE recurrent-only gate -- NOT AVAILABLE.
+    """Recurrent-only rSLDS transitions with fixed self-transition stickiness.
 
-    ssm's RecurrentOnlyTransitions subclasses Transitions directly
-    (log p(z_t=j | x) = R_j.x + r_j, no stationary log_Ps) and carries NO
-    Dirichlet (alpha, kappa) sticky prior, so stickiness cannot ride in a prior
-    here. The validated run uses transition_kind='recurrent' throughout, so this
-    path is never taken; it raises rather than silently substituting a different
-    stickiness mechanism.
+    Linderman et al. ("Bayesian Learning and Inference in Recurrent Switching
+    Linear Dynamical Systems", AISTATS 2017) define `recurrent_only`:
+    log p(z_t=j | x) = R_j.x + r_j, with NO dependence on z_{t-1}, so the
+    discrete state carries no temporal persistence of its own. This subclass
+    adds Fox-style self-transition stickiness ("A sticky HDP-HMM with
+    application to speaker diarization", Ann. Appl. Stat. 2011): a fixed
+    scalar kappa added to the diagonal of the per-step log transition
+    matrix before normalisation,
+
+        log p(z_t=j | z_{t-1}=i, x) = R_j.x + r_j + kappa * 1[i==j]
+
+    so regime persistence lives in the DISCRETE transitions and the
+    continuous AR coefficient A can stay bounded (stationary). kappa is a
+    constant; not added to params, not optimised in the M-step.
     """
 
-    def __init__(self, K, D, M, kappa, alpha=1.0):
-        raise NotImplementedError(
-            "Native Dirichlet stickiness is unavailable for the recurrent_only "
-            "gate (ssm's RecurrentOnlyTransitions has no alpha/kappa prior). Use "
-            "transition_kind='recurrent' (StickyRecurrent) for native kappa.")
+    def __init__(self, K, D, M, kappa):
+        super(StickyRecurrentOnly, self).__init__(K, D, M=M)
+        self.kappa = float(kappa)
+
+    def log_transition_matrices(self, data, input, mask, tag):
+        lp = super(StickyRecurrentOnly, self).log_transition_matrices(
+            data, input, mask, tag)
+        lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
+        return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
 
     def effective_log_Ps(self):
-        """None: this gate carries no stationary (K, K) matrix. Unreachable --
-        __init__ raises -- but present so both fitters expose one class API."""
+        """None: this gate carries no stationary (K, K) matrix -- the whole
+        transition is R.x + r + kappa*I, formed per step."""
         return None
 
 
 class StickyRecurrent(_Recurrent):
-    """Full rSLDS(s) transitions (Linderman 2017 Eq. 4, shared variant) with
-    Fox-2011 stickiness carried by ssm's own Dirichlet self-transition prior.
+    """Full rSLDS(s) transitions (Linderman 2017 Eq. 4, shared-weights variant)
+    with the SAME Fox-2011 self-transition stickiness as the other two sticky
+    classes. Combines a per-state Markov matrix with a shared recurrence term:
 
-    ssm's RecurrentTransitions (InputDrivenTransitions <- StickyTransitions) is
-    natively sticky: the row-wise prior pi_k ~ Dir(alpha + kappa * e_k) enters
-    log_prior() -> the gradient M-step, while the recurrent term R.x stays in
-    log_transition_matrices. kappa is a FIXED hyperparameter (not a fitted param).
-    alpha is FIXED to 1, so at K=2 the prior-mean self-transition gives
-    E[dwell] = kappa + 2 (the native map). Setting Rs=0 recovers the stationary
-    Dirichlet transitions (StickyStandard), so the fixed-matrix null is NESTED --
-    the property the state-dependence test (T3) relies on.
+        log p(z_t=j | z_{t-1}=i, x) = log_Ps[i,j] + R_j.x + kappa * 1[i==j]
+
+    (then renormalised). Setting R=0 recovers exactly StickyStandard, so a
+    fixed-matrix null is NESTED in this candidate -- the property the
+    state-dependence test (T3) relies on. kappa is a constant; not added to
+    params, not optimised in the M-step.
     """
 
-    def __init__(self, K, D, M, kappa, alpha=1.0):
-        # alpha scales the WHOLE Dirichlet row: pi_k ~ Dir(alpha*1 + kappa*e_k).
-        # Prior-mean self-transition = (alpha+kappa)/(K*alpha+kappa), so with
-        # kappa = alpha*(D-2) (K=2) the prior MEAN dwell is D regardless of
-        # alpha, while the prior MASS (its weight against the likelihood's
-        # transition counts) is alpha*D. alpha=1 reproduces the historic
-        # weakly-informative prior.
-        super(StickyRecurrent, self).__init__(K, D, M=M, alpha=float(alpha), kappa=float(kappa))
+    def __init__(self, K, D, M, kappa):
+        super(StickyRecurrent, self).__init__(K, D, M=M)
+        self.kappa = float(kappa)
+
+    def log_transition_matrices(self, data, input, mask, tag):
+        lp = super(StickyRecurrent, self).log_transition_matrices(
+            data, input, mask, tag)
+        lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
+        return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
 
     def effective_log_Ps(self):
-        """log_Ps unchanged. kappa entered through the Dirichlet prior in
-        log_prior() and shaped the M-step, so it is ALREADY inside the fitted
-        log_Ps; log_transition_matrices adds no kappa term. Folding kappa*I in
-        again here would double-count it."""
-        lp = np.asarray(self.log_Ps, dtype=float)
+        """kappa is applied on top of log_Ps at every step, so the matrix the
+        model actually uses is normalise(log_Ps + kappa*I). Persistence and
+        scoring must fold it in; log_Ps alone understates the stickiness."""
+        lp = np.asarray(self.log_Ps, dtype=float) + self.kappa * np.eye(self.K)
         return lp - logsumexp(lp, axis=1, keepdims=True)
 
 
-class StickyStandard(_StickyStd):
-    """NATIVE time-homogeneous transitions carrying Fox-2011 stickiness via ssm's
-    Dirichlet self-transition prior (StickyTransitions) -- the matched
-    fixed-matrix comparator for T3. The transition matrix is a fixed K x K log_Ps
-    (time-homogeneous); kappa upweights the diagonal of the prior
-    pi_k ~ Dir(alpha + kappa * e_k), which enters the closed-form MAP M-step.
-    alpha is FIXED to 1 (E[dwell] = kappa + 2 at K=2). Differs from StickyRecurrent
-    ONLY in the transition functional form (fixed matrix vs recurrent R.x), with
-    the SAME native stickiness prior -- so rSLDS - SLDS isolates exactly R.x.
+class StickyStandard(_Stationary):
+    """Standard (time-homogeneous) transitions carrying the SAME Fox-2011 self-
+    transition stickiness as StickyRecurrentOnly. A fixed scalar kappa is added to
+    the diagonal of the per-step log transition matrix and then renormalised -- the
+    IDENTICAL treatment applied to the recurrent sticky gate -- so an rSLDS-vs-SLDS
+    comparison differs ONLY in the transition functional form (recurrent R.x vs a
+    fixed K x K matrix), not in the stickiness regularisation:
+
+        log p(z_t=j | z_{t-1}=i) = log_Ps[i,j] + kappa * 1[i==j]   (then renormalised)
+
+    kappa is a constant; not added to params, not optimised in the M-step.
     """
 
-    def __init__(self, K, D, M, kappa, alpha=1.0):
-        # Same alpha-scaled Dirichlet row as StickyRecurrent (see there).
-        super(StickyStandard, self).__init__(K, D, M=M, alpha=float(alpha), kappa=float(kappa))
+    def __init__(self, K, D, M, kappa):
+        super(StickyStandard, self).__init__(K, D, M=M)
+        self.kappa = float(kappa)
+
+    def log_transition_matrices(self, data, input, mask, tag):
+        lp = super(StickyStandard, self).log_transition_matrices(
+            data, input, mask, tag)
+        lp = lp + self.kappa * _anp.eye(self.K)[None, :, :]
+        return lp - _ag_logsumexp(lp, axis=2, keepdims=True)
 
     def effective_log_Ps(self):
-        """log_Ps unchanged. kappa entered through the Dirichlet prior in
-        log_prior() and shaped the M-step, so it is ALREADY inside the fitted
-        log_Ps; log_transition_matrices adds no kappa term. Folding kappa*I in
-        again here would double-count it."""
-        lp = np.asarray(self.log_Ps, dtype=float)
+        """kappa is applied on top of log_Ps at every step, so the matrix the
+        model actually uses is normalise(log_Ps + kappa*I). Persistence and
+        scoring must fold it in; log_Ps alone understates the stickiness."""
+        lp = np.asarray(self.log_Ps, dtype=float) + self.kappa * np.eye(self.K)
         return lp - logsumexp(lp, axis=1, keepdims=True)
 
 
@@ -679,10 +695,9 @@ def fit_rSLDS_restricted_em(y, params, C=None, d=None, n_iter_em=10, seed=None,
     min_occupancy=0.05,      # per-regime usage floor; an EM run that drops the occupied-regime
                              # count below the closed-form's is rejected in favour of that fit
     transition_kind="recurrent",   # default: full recurrent gate (Eq.4), nests sticky SLDS at R=0;
+    sticky_kappa=None):   # Fox sticky self-transition weight; None => no stickiness
                              # "standard" -> SLDS (StickyStandard fixed matrix). Same kappa, same
                              # warm-up / EM / occupancy-revert: the ONLY difference is the gate form.
-    sticky_kappa=None,    # Fox sticky self-transition weight; None => no stickiness
-    sticky_alpha=None):   # Dirichlet row strength; None => 1.0 (historic weakly-informative prior)
 
     """
     True rSLDS via ssm (Laplace EM + structured mean field):
@@ -799,15 +814,14 @@ def fit_rSLDS_restricted_em(y, params, C=None, d=None, n_iter_em=10, seed=None,
     #   recurrent_only -> StickyRecurrentOnly  (Linderman 2017 gate)
     #   recurrent      -> StickyRecurrent      (Eq.4 shared variant, nests standard)
     #   standard       -> StickyStandard       (fixed K x K matrix)
-    _alpha = 1.0 if sticky_alpha is None else float(sticky_alpha)
     if sticky_kappa is None:
         pass  # no stickiness: keep the plain _RecOnly/_Recurrent/_Stationary gate
     elif _rec_only:
-        mdl.transitions = StickyRecurrentOnly(K, D, M=0, kappa=sticky_kappa, alpha=_alpha)
+        mdl.transitions = StickyRecurrentOnly(K, D, M=0, kappa=sticky_kappa)
     elif _rec_full:
-        mdl.transitions = StickyRecurrent(K, D, M=0, kappa=sticky_kappa, alpha=_alpha)
+        mdl.transitions = StickyRecurrent(K, D, M=0, kappa=sticky_kappa)
     else:
-        mdl.transitions = StickyStandard(K, D, M=0, kappa=sticky_kappa, alpha=_alpha)
+        mdl.transitions = StickyStandard(K, D, M=0, kappa=sticky_kappa)
 
     # ----- emissions (fixed if C,d provided; else learned)
     fixed_emissions = (C is not None) and (d is not None)
