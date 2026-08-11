@@ -1302,11 +1302,15 @@ def fit_rSLDS_restricted_em(y, params, C=None, d=None, n_iter_em=10, seed=None,
             print(f"[em-revert] K={K} D={D} N={N}: EM occupied {em_used}/{K} regimes "
                   f"vs closed-form {base_used}/{K} (floor={min_occupancy}) -> "
                   f"closed-form fit retained", flush=True)
-            if _rec_full:
+            if _rec_full or (transition_kind == "standard"
+                             and sticky_kappa is not None):
                 # base_mdl is the closed-form FIXED-MATRIX fit (different
-                # transition class, no kappa). Return the live recurrent model
-                # restored to the warm-start state instead: same parameters,
-                # Rs=0 (the nested null), correct class for downstream scoring.
+                # transition class, no kappa). Return the live model restored
+                # to the warm-start state instead: same parameters, correct
+                # class, and the Fox kappa preserved -- reverting must not
+                # silently drop the stickiness the candidate was fitted with.
+                # 'recurrent' additionally zeroes Rs (the nested null);
+                # 'standard' owns no Rs.
                 mdl.dynamics.As      = np.array(base_mdl.dynamics.As, dtype=float)
                 mdl.dynamics.bs      = np.array(base_mdl.dynamics.bs, dtype=float)
                 mdl.dynamics.sigmasq = np.maximum(
@@ -1315,7 +1319,8 @@ def fit_rSLDS_restricted_em(y, params, C=None, d=None, n_iter_em=10, seed=None,
                 mdl.emissions.ds       = np.array(base_mdl.emissions.ds, dtype=float)
                 mdl.emissions.inv_etas = np.array(base_mdl.emissions.inv_etas, dtype=float)
                 mdl.transitions.log_Ps = np.array(base_mdl.transitions.log_Ps, dtype=float)
-                mdl.transitions.Rs     = np.zeros_like(np.asarray(mdl.transitions.Rs))
+                if _rec_full:
+                    mdl.transitions.Rs = np.zeros_like(np.asarray(mdl.transitions.Rs))
                 mdl._em_converged = bool(converged)
                 mdl._em_iters = int(iters_done)
                 return (x_base, z_base, np.asarray(elbo_trace, dtype=float),
